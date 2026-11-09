@@ -36,7 +36,7 @@
 
 La plateforme implémente l'architecture **Médaillon (Medallion Lakehouse)** garantissant l'immuabilité des données brutes, la traçabilité des rejets et l'idempotence totale des recalculs.
 
-![Architecture Globale du Medallion Lakehouse](docs/img/medallion_architecture_overview.png)
+![Architecture Globale du Pipeline Lakehouse](docs/img/architecture_pipeline_minimal.png)
 
 ```mermaid
 flowchart TD
