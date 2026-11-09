@@ -1,0 +1,431 @@
+# ==============================================================================
+# NYC Taxi Data Platform — Marts Layer Documentation & Quality Tests
+# Kimball Star Schema: Conformed Dimensions, Fact Tables, Aggregates & Quality Gates
+# ==============================================================================
+
+version: 2
+
+models:
+  # ============================================================================
+  # 1. FACT TABLE: fct_trips
+  # ============================================================================
+  - name: fct_trips
+    description: >
+      Table de faits transactionnelle centrale au grain d'un trajet de taxi (Yellow Taxi).
+      Matérialisée de manière incrémentale avec une stratégie 'delete+insert' pour garantir
+      une idempotence totale lors des relances ou des backfills mensuels.
+    columns:
+      - name: trip_id
+        description: "Clé primaire unique du trajet (empreinte SHA-256 calculée sur les attributs clés du trajet)."
+        tests:
+          - unique
+          - not_null
+
+      - name: pickup_date_id
+        description: "Clé étrangère vers dim_date (format entier YYYYMMDD)."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_id
+
+      - name: dropoff_date_id
+        description: "Clé étrangère vers dim_date pour la date de fin de course (YYYYMMDD)."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_id
+
+      - name: pickup_hour
+        description: "Heure d'enclenchement de la course (0 à 23)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+      - name: dropoff_hour
+        description: "Heure de dépose du passager (0 à 23)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+      - name: pickup_zone_id
+        description: "Clé étrangère vers dim_zone indiquant la zone de prise en charge."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_zone')
+              field: zone_id
+
+      - name: dropoff_zone_id
+        description: "Clé étrangère vers dim_zone indiquant la zone de dépose."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_zone')
+              field: zone_id
+
+      - name: payment_type_id
+        description: "Clé étrangère vers dim_payment_type (mode de règlement)."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_payment_type')
+              field: payment_type_id
+
+      - name: vendor_id
+        description: "Identifiant du fournisseur de technologie TPEP (1: Creative Mobile, 2: VeriFone)."
+        tests:
+          - not_null
+
+      - name: ratecode_id
+        description: "Code tarifaire final appliqué au trajet (1: Standard, 2: JFK, 3: Newark, etc.)."
+
+      - name: pickup_datetime
+        description: "Horodatage précis de début de course."
+        tests:
+          - not_null
+
+      - name: dropoff_datetime
+        description: "Horodatage précis de fin de course."
+        tests:
+          - not_null
+
+      - name: store_and_fwd_flag
+        description: "Indicateur d'enregistrement hors ligne avant transmission (Y: Oui, N: Non)."
+        tests:
+          - accepted_values:
+              values: ['Y', 'N']
+
+      - name: is_airport_trip
+        description: "Indicateur booléen signalant si le trajet a pour origine ou destination un aéroport (JFK, LaGuardia, Newark)."
+        tests:
+          - not_null
+
+      - name: passenger_count
+        description: "Nombre de passagers enregistrés par le chauffeur."
+        tests:
+          - not_null
+
+      - name: trip_distance_miles
+        description: "Distance parcourue en miles selon le taximètre (doit être strictement positive)."
+        tests:
+          - not_null
+
+      - name: duration_minutes
+        description: "Durée totale de la course en minutes (inférieure ou égale à 6 heures par règle qualité)."
+        tests:
+          - not_null
+
+      - name: avg_speed_mph
+        description: "Vitesse moyenne calculée en miles par heure."
+
+      - name: fare_amount
+        description: "Montant du tarif de base calculé au temps et à la distance ($ USD)."
+        tests:
+          - not_null
+
+      - name: extra_amount
+        description: "Suppléments divers (heures de pointe, nuit)."
+
+      - name: mta_tax_amount
+        description: "Taxe métropolitaine MTA de 0.50 $."
+
+      - name: tip_amount
+        description: "Montant du pourboire ($ USD, renseigné automatiquement pour les cartes bancaires)."
+
+      - name: tolls_amount
+        description: "Frais de péages de ponts et tunnels."
+
+      - name: improvement_surcharge
+        description: "Taxe d'amélioration du service (0.30 $ / 1.00 $)."
+
+      - name: congestion_surcharge
+        description: "Taxe de congestion pour circulation au sud de la 96e rue de Manhattan."
+
+      - name: airport_fee
+        description: "Taxe spécifique d'accès aux aéroports JFK et LaGuardia."
+
+      - name: total_amount
+        description: "Montant total facturé au client ($ USD)."
+        tests:
+          - not_null
+
+      - name: tip_percentage
+        description: "Ratio du pourboire rapporté au fare_amount (en pourcentage)."
+
+      - name: partition_month
+        description: "Partition mensuelle de rattachement au format YYYY-MM."
+        tests:
+          - not_null
+
+  # ============================================================================
+  # 2. DIMENSION: dim_date
+  # ============================================================================
+  - name: dim_date
+    description: >
+      Dimension confluente Date au grain journalier (1 ligne par jour civil).
+      Enrichie des attributs de calendrier (trimestre, jour ouvré, week-end)
+      et des jours fériés fédéraux américains.
+    columns:
+      - name: date_id
+        description: "Clé primaire numérique intelligente (YYYYMMDD)."
+        tests:
+          - unique
+          - not_null
+
+      - name: date_day
+        description: "Date civile au format standard DATE (YYYY-MM-DD)."
+        tests:
+          - unique
+          - not_null
+
+      - name: day_of_month
+        description: "Numéro du jour dans le mois (1 à 31)."
+        tests:
+          - not_null
+
+      - name: month_number
+        description: "Numéro du mois dans l'année (1 à 12)."
+        tests:
+          - not_null
+
+      - name: month_name
+        description: "Nom complet du mois en anglais."
+        tests:
+          - not_null
+
+      - name: year_number
+        description: "Année civile (ex: 2024)."
+        tests:
+          - not_null
+
+      - name: quarter_number
+        description: "Trimestre civil de l'année (1 à 4)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4]
+
+      - name: day_of_week_number
+        description: "Index du jour dans la semaine (0 pour Dimanche, 6 pour Samedi)."
+        tests:
+          - not_null
+
+      - name: day_of_week_name
+        description: "Nom complet du jour de la semaine."
+        tests:
+          - not_null
+
+      - name: is_weekend
+        description: "Indicateur booléen désignant un jour de week-end (Samedi ou Dimanche)."
+        tests:
+          - not_null
+
+      - name: is_us_holiday
+        description: "Indicateur booléen désignant un jour férié officiel aux États-Unis."
+        tests:
+          - not_null
+
+      - name: holiday_name
+        description: "Intitulé officiel du jour férié américain (ex: New Year's Day, Independence Day)."
+
+      - name: temperature_max_c
+        description: "Température maximale journalière en degrés Celsius (Open-Meteo)."
+
+      - name: temperature_min_c
+        description: "Température minimale journalière en degrés Celsius (Open-Meteo)."
+
+      - name: precipitation_mm
+        description: "Cumul de précipitations journalières en millimètres."
+
+      - name: snowfall_cm
+        description: "Cumul de chutes de neige journalières en centimètres."
+
+  # ============================================================================
+  # 3. DIMENSION: dim_zone
+  # ============================================================================
+  - name: dim_zone
+    description: >
+      Dimension spatiale confluente des zones de taxi de New York City.
+      Grain = 1 zone géographique officielle de la TLC (265 zones officielles).
+    columns:
+      - name: zone_id
+        description: "Clé primaire officielle TLC (LocationID de 1 à 265)."
+        tests:
+          - unique
+          - not_null
+
+      - name: zone_name
+        description: "Nom usuel de la zone géographique ou du quartier."
+        tests:
+          - not_null
+
+      - name: borough
+        description: "Arrondissement ou comté d'appartenance à New York City."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Manhattan', 'Queens', 'Brooklyn', 'Bronx', 'Staten Island', 'EWR', 'Unknown', 'N/A']
+
+      - name: service_zone
+        description: "Classification administrative TLC (Yellow Zone, Boro Zone, Airports, EWR, N/A)."
+        tests:
+          - not_null
+
+      - name: is_airport_zone
+        description: "Booléen spécifiant si la zone est un aéroport métropolitain majeur."
+        tests:
+          - not_null
+
+      - name: zone_category
+        description: "Regroupement macro-analytique (Core Urban, Airport Hub, Outer Borough, Other)."
+
+  # ============================================================================
+  # 4. DIMENSION: dim_payment_type
+  # ============================================================================
+  - name: dim_payment_type
+    description: >
+      Dimension confluente des modes de paiement avec libellés métiers explicites.
+      Grain = 1 modalité de paiement reconnue par la TLC.
+    columns:
+      - name: payment_type_id
+        description: "Clé primaire correspondant au code numérique TLC."
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6]
+
+      - name: payment_code
+        description: "Code technique normalisé (CREDIT_CARD, CASH, NO_CHARGE, etc.)."
+        tests:
+          - not_null
+
+      - name: payment_type_name
+        description: "Libellé métier explicite en français (Carte bancaire, Espèces, Sans frais, Litige, Inconnu, Annulé)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Carte bancaire', 'Espèces', 'Sans frais', 'Litige', 'Inconnu', 'Annulé']
+
+      - name: description
+        description: "Description fonctionnelle de la modalité de paiement."
+
+      - name: is_electronic
+        description: "Indicateur de paiement dématérialisé."
+        tests:
+          - not_null
+
+      - name: is_cash
+        description: "Indicateur de règlement en devises physiques (espèces)."
+        tests:
+          - not_null
+
+  # ============================================================================
+  # 5. AGGREGATE MART: agg_zone_hourly
+  # ============================================================================
+  - name: agg_zone_hourly
+    description: >
+      Table d'agrégat pré-calculée au grain 'zone de départ x date x heure'.
+      Optimisée pour l'accélération des requêtes BI Metabase et l'analyse de flux.
+    columns:
+      - name: pickup_zone_id
+        description: "Zone de prise en charge."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_zone')
+              field: zone_id
+
+      - name: pickup_date
+        description: "Date civile de la course."
+        tests:
+          - not_null
+
+      - name: pickup_hour
+        description: "Heure de la journée (0 à 23)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+      - name: trip_count
+        description: "Nombre total de trajets enregistrés sur ce créneau."
+        tests:
+          - not_null
+
+      - name: total_passengers
+        description: "Volume cumulé de passagers transportés."
+
+      - name: airport_trip_count
+        description: "Nombre de trajets en liaison avec un aéroport."
+
+      - name: total_revenue
+        description: "Chiffre d'affaires total généré ($ USD)."
+        tests:
+          - not_null
+
+      - name: total_fare
+        description: "Total des tarifs de base ($ USD)."
+
+      - name: total_tips
+        description: "Total des pourboires collectés ($ USD)."
+
+      - name: avg_tip_amount
+        description: "Montant moyen du pourboire par course."
+
+      - name: avg_fare_amount
+        description: "Prix de base moyen par course."
+
+      - name: avg_trip_distance_miles
+        description: "Distance moyenne parcourue par course (en miles)."
+
+      - name: avg_duration_minutes
+        description: "Durée moyenne de course (en minutes)."
+
+      - name: avg_speed_mph
+        description: "Vitesse moyenne estimée (en miles par heure)."
+
+  # ============================================================================
+  # 6. QUALITY OBSERVABILITY MART: quarantine_summary
+  # ============================================================================
+  - name: quarantine_summary
+    description: >
+      Vue d'analyse de la qualité des données consolidant les rejets en quarantaine.
+      Grain = motif de rejet x mois de partition. Permet de monitorer le drift
+      et les anomalies de capteurs ou de parsing.
+    columns:
+      - name: partition_month
+        description: "Mois de partition concerné (format YYYY-MM)."
+        tests:
+          - not_null
+
+      - name: reject_reason
+        description: "Motif ou combinaison de règles qualité violées."
+        tests:
+          - not_null
+
+      - name: rejected_records_count
+        description: "Nombre de lignes rejetées pour ce motif précis."
+        tests:
+          - not_null
+
+      - name: total_month_rejections
+        description: "Nombre total de rejets recensés sur le mois."
+        tests:
+          - not_null
+
+      - name: rejection_share_pct
+        description: "Pourcentage représenté par ce motif dans le volume total rejeté du mois."
+
+      - name: avg_invalid_duration_minutes
+        description: "Durée moyenne des trajets rejetés."
+
+      - name: avg_invalid_distance_miles
+        description: "Distance moyenne des trajets rejetés."
+
+      - name: avg_invalid_total_amount
+        description: "Montant moyen des trajets rejetés."

@@ -1,0 +1,526 @@
+# ==============================================================================
+# NYC Taxi Data Platform — Docker Compose
+# Stack: MinIO · Spark 3.5 · Kafka 3.7 (KRaft) · Airflow 3 · PostgreSQL · Metabase
+# Target: 16 GB RAM / 4 cores local machine
+# ==============================================================================
+
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.4.0b2-python3.11}
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Dedicated PostgreSQL instance for Airflow metadata
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER:-airflow}:${AIRFLOW_POSTGRES_PASSWORD:-airflow}@airflow-postgres:5432/${AIRFLOW_POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-d9e80a37c62bfe8e60cd659827575da8c6650e5465ee0471becf44893a7bcc5c}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: 'UTC'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-api-server:8080/execution/'
+    AIRFLOW__API__BASE_URL: 'http://localhost:8080'
+    AIRFLOW__WEBSERVER__BASE_URL: 'http://localhost:8080'
+    AIRFLOW__CORE__AUTH_MANAGER: 'airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager'
+    # Resource & Concurrency Tuning for 16 GB RAM Host
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 1
+    AIRFLOW__CORE__PARALLELISM: 4
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 4
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: 2
+    # DWH PostgreSQL Connection (pipeline_runs & marts)
+    DWH_POSTGRES_HOST: postgres
+    DWH_POSTGRES_PORT: 5432
+    DWH_POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    DWH_POSTGRES_USER: ${POSTGRES_USER:-airflow}
+    DWH_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+    # MinIO / S3 Connection
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ENDPOINT_HOST: http://minio:9000
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    # dbt Configuration
+    DBT_TARGET: duckdb
+    DUCKDB_PATH: /opt/airflow/data/taxi_warehouse.duckdb
+    # Spark Connection
+    SPARK_MASTER_URL: spark://spark-master:7077
+    _PIP_ADDITIONAL_REQUIREMENTS: >-
+      apache-airflow-providers-standard
+      apache-airflow-providers-apache-spark
+      apache-airflow-providers-amazon
+      apache-airflow-providers-postgres
+      apache-airflow-providers-fab
+      boto3
+      minio
+      psycopg2-binary
+      requests
+      pandas
+      pyarrow
+      holidays
+      dbt-core
+      dbt-postgres
+      dbt-duckdb
+      duckdb
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/config:/opt/airflow/config
+    - ./spark_jobs:/opt/airflow/spark_jobs
+    - ./ingestion:/opt/airflow/ingestion
+    - ./dbt:/opt/airflow/dbt
+    - ./data:/opt/airflow/data
+    - ./infra:/opt/airflow/infra
+    - spark-jars:/opt/airflow/spark_jars:ro
+    - /var/run/docker.sock:/var/run/docker.sock
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks:
+    - taxi-platform-net
+
+services:
+  # ============================================================================
+  # 1. DATABASES — PostgreSQL 15 (Dedicated Airflow Metadata + DWH / Observability)
+  # ============================================================================
+  # 1a. Dedicated PostgreSQL for Airflow Metadata DB
+  airflow-postgres:
+    image: postgres:15-alpine
+    container_name: taxi-airflow-postgres
+    environment:
+      POSTGRES_USER: ${AIRFLOW_POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_POSTGRES_DB:-airflow}
+    ports:
+      - "${AIRFLOW_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_POSTGRES_USER:-airflow} -d ${AIRFLOW_POSTGRES_DB:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - taxi-platform-net
+
+  # 1b. DWH & Observability PostgreSQL (pipeline_runs table, analytics, Metabase)
+  postgres:
+    image: postgres:15-alpine
+    container_name: taxi-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/scripts/init_postgres_dwh.sql:/docker-entrypoint-initdb.d/init_postgres_dwh.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airflow} -d ${POSTGRES_DB:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - taxi-platform-net
+
+  # ============================================================================
+  # 2. OBJECT STORAGE — MinIO (S3-compatible Data Lake)
+  # ============================================================================
+  minio:
+    image: minio/minio:latest
+    pull_policy: if_not_present
+    container_name: taxi-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - taxi-platform-net
+
+  # MinIO Init — Creates bronze/silver/gold/quarantine buckets
+  minio-init:
+    image: minio/minio:latest
+    pull_policy: if_not_present
+    container_name: taxi-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./infra/scripts/init_minio.sh:/init_minio.sh:ro
+    entrypoint: ["/bin/sh", "/init_minio.sh"]
+    networks:
+      - taxi-platform-net
+
+  # ============================================================================
+  # 3. DISTRIBUTED PROCESSING — Apache Spark 3.5 (Master + Worker)
+  #    Memory budget: Master ~2GB + Worker ~6GB = ~8GB total
+  #    JARs: delta-spark 3.1.0 + hadoop-aws 3.3.4 pre-downloaded
+  # ============================================================================
+  spark-master:
+    image: apache/spark:3.5.9-python3
+    container_name: taxi-spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      - HOME=/tmp
+      - PATH=/opt/spark/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_DAEMON_MEMORY=1g
+      - SPARK_DIST_CLASSPATH=/opt/spark/jars_extra/*
+      # S3/MinIO configuration for Spark
+      - SPARK_CONF_spark.hadoop.fs.s3a.endpoint=http://minio:9000
+      - SPARK_CONF_spark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER:-minioadmin}
+      - SPARK_CONF_spark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - SPARK_CONF_spark.hadoop.fs.s3a.path.style.access=true
+      - SPARK_CONF_spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+      # Delta Lake configuration
+      - SPARK_CONF_spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
+      - SPARK_CONF_spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
+    ports:
+      - "${SPARK_MASTER_WEBUI_PORT:-8085}:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./tests:/opt/tests
+      - ./data:/opt/spark_data
+      - spark-jars:/opt/spark/jars_extra
+    networks:
+      - taxi-platform-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  spark-worker:
+    image: apache/spark:3.5.9-python3
+    container_name: taxi-spark-worker
+    depends_on:
+      - spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      - HOME=/tmp
+      - PATH=/opt/spark/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-4g}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+      - SPARK_DIST_CLASSPATH=/opt/spark/jars_extra/*
+      # S3/MinIO configuration
+      - SPARK_CONF_spark.hadoop.fs.s3a.endpoint=http://minio:9000
+      - SPARK_CONF_spark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER:-minioadmin}
+      - SPARK_CONF_spark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - SPARK_CONF_spark.hadoop.fs.s3a.path.style.access=true
+      - SPARK_CONF_spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+      # Delta Lake configuration
+      - SPARK_CONF_spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
+      - SPARK_CONF_spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./data:/opt/spark_data
+      - spark-jars:/opt/spark/jars_extra
+    networks:
+      - taxi-platform-net
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  # Spark JARs Init — Downloads Delta Lake + Hadoop-AWS JARs once
+  spark-jars-init:
+    image: apache/spark:3.5.9-python3
+    container_name: taxi-spark-jars-init
+    user: root
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        EXTRA_DIR=/opt/spark/jars_extra
+
+        # Delta Lake 3.1.0 for Spark 3.5
+        DELTA_CORE=delta-spark_2.12-3.1.0.jar
+        DELTA_STORAGE=delta-storage-3.1.0.jar
+        # Hadoop AWS 3.3.4
+        HADOOP_AWS=hadoop-aws-3.3.4.jar
+        AWS_SDK=aws-java-sdk-bundle-1.12.262.jar
+
+        mkdir -p $${EXTRA_DIR}
+
+        if [ ! -f "$${EXTRA_DIR}/$${DELTA_CORE}" ]; then
+          echo "📥 Downloading Delta Lake JARs..."
+          curl -fSL -o $${EXTRA_DIR}/$${DELTA_CORE} \
+            "https://repo1.maven.org/maven2/io/delta/delta-spark_2.12/3.1.0/$${DELTA_CORE}"
+          curl -fSL -o $${EXTRA_DIR}/$${DELTA_STORAGE} \
+            "https://repo1.maven.org/maven2/io/delta/delta-storage/3.1.0/$${DELTA_STORAGE}"
+        else
+          echo "✅ Delta Lake JARs already present."
+        fi
+
+        if [ ! -f "$${EXTRA_DIR}/$${HADOOP_AWS}" ]; then
+          echo "📥 Downloading Hadoop-AWS JARs..."
+          curl -fSL -o $${EXTRA_DIR}/$${HADOOP_AWS} \
+            "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/$${HADOOP_AWS}"
+          curl -fSL -o $${EXTRA_DIR}/$${AWS_SDK} \
+            "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/$${AWS_SDK}"
+        else
+          echo "✅ Hadoop-AWS JARs already present."
+        fi
+
+        echo "📋 Extra JARs installed:"
+        ls -lh $${EXTRA_DIR}/
+        echo "✅ Spark JARs initialization completed."
+    volumes:
+      - spark-jars:/opt/spark/jars_extra
+    networks:
+      - taxi-platform-net
+
+  # ============================================================================
+  # 4. ORCHESTRATION — Apache Airflow 3.2.2 (Webserver/API Server + Scheduler)
+  # ============================================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: taxi-airflow-init
+
+    command: >
+      bash -c "
+        airflow db migrate &&
+        (airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@taxi-platform.local || true)
+      "
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+
+  airflow-api-server:
+    <<: *airflow-common
+    container_name: taxi-airflow-api-server
+    command: api-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v2/monitor/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: taxi-airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    restart: always
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: taxi-airflow-dag-processor
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: always
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: taxi-airflow-triggerer
+    command: triggerer
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: always
+
+  # ============================================================================
+  # 5. BUSINESS INTELLIGENCE — Metabase 0.49
+  # ============================================================================
+  metabase:
+    image: metabase/metabase:latest
+    container_name: taxi-metabase
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: ${POSTGRES_DB:-airflow}
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${POSTGRES_USER:-airflow}
+      MB_DB_PASS: ${POSTGRES_PASSWORD:-airflow}
+      MB_DB_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - metabase-data:/metabase-data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - taxi-platform-net
+    restart: always
+
+  # ============================================================================
+  # 6. STREAMING — Apache Kafka (KRaft Mode — No ZooKeeper)
+  # ============================================================================
+  kafka:
+    image: apache/kafka:latest
+    container_name: taxi-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_RETENTION_BYTES: 536870912
+      KAFKA_NUM_PARTITIONS: 4
+      KAFKA_HEAP_OPTS: '-Xms256m -Xmx384m'
+      CLUSTER_ID: 'Mk3OEYBSD34567890ABCDE'
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - taxi-platform-net
+
+  # Kafka Topic Init — Creates taxi_trips topic with 4 partitions
+  kafka-init:
+    image: apache/kafka:latest
+    container_name: taxi-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "⏳ Creating Kafka topics..."
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic taxi_trips \
+          --partitions 4 \
+          --replication-factor 1 \
+          --config retention.ms=86400000 \
+          --config max.message.bytes=1048576
+
+        echo "📋 Topics created:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+        echo "✅ Kafka topic initialization completed."
+    networks:
+      - taxi-platform-net
+
+  # ============================================================================
+  # 7. ANALYTICS DASHBOARD — Streamlit 1.35
+  # ============================================================================
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: taxi-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    environment:
+      DWH_POSTGRES_HOST: postgres
+      DWH_POSTGRES_PORT: 5432
+      DWH_POSTGRES_DB: ${POSTGRES_DB:-airflow}
+      DWH_POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      DWH_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      DUCKDB_PATH: /data/taxi_warehouse.duckdb
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./dashboard:/app/dashboard
+      - ./data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - taxi-platform-net
+    restart: always
+
+# ==============================================================================
+# VOLUMES & NETWORKS
+# ==============================================================================
+volumes:
+  postgres-data:
+  airflow-postgres-data:
+  minio-data:
+  metabase-data:
+  spark-jars:
+  kafka-data:
+
+networks:
+  taxi-platform-net:
+    driver: bridge

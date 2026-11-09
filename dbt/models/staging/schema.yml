@@ -1,0 +1,151 @@
+# ==============================================================================
+# NYC Taxi Data Platform — Staging Layer Documentation & Quality Tests
+# Views standardizing raw Silver, Quarantine, and Reference data
+# ==============================================================================
+
+version: 2
+
+models:
+  # ============================================================================
+  # 1. STAGING: stg_silver_trips
+  # ============================================================================
+  - name: stg_silver_trips
+    description: >
+      Vue de staging standardisant les trajets nettoyés de la couche Silver (Delta Lake).
+      Applique le typage strict, les alias snake_case, et calcule la clé de partition YYYY-MM.
+    columns:
+      - name: trip_id
+        description: "Clé primaire (SHA-256 ou MD5 fallback sur les attributs clés du trajet)"
+        tests:
+          - not_null
+      - name: vendor_id
+        description: "Code fournisseur TLC (1: Creative Mobile, 2: VeriFone)"
+        tests:
+          - not_null
+      - name: pickup_datetime
+        description: "Horodatage d'engagement du compteur"
+        tests:
+          - not_null
+      - name: dropoff_datetime
+        description: "Horodatage de désengagement du compteur"
+        tests:
+          - not_null
+      - name: passenger_count
+        description: "Nombre de passagers (défaut: 1 si null)"
+      - name: trip_distance_miles
+        description: "Distance du trajet en miles (NUMERIC(10,2))"
+      - name: ratecode_id
+        description: "Code tarif TLC (1: Standard, 2: JFK, 3: Newark, etc.)"
+      - name: store_and_fwd_flag
+        description: "Indicateur store-and-forward (Y/N, défaut: N)"
+      - name: pu_location_id
+        description: "Clé étrangère zone de prise en charge (1–265)"
+      - name: do_location_id
+        description: "Clé étrangère zone de dépose (1–265)"
+      - name: payment_type_id
+        description: "Clé étrangère type de paiement (défaut: 5=Unknown si null)"
+      - name: fare_amount
+        description: "Tarif calculé par le compteur (NUMERIC(10,2))"
+      - name: extra_amount
+        description: "Supplément rush hour / nuit (défaut: 0.00)"
+      - name: mta_tax_amount
+        description: "Taxe MTA (défaut: 0.00)"
+      - name: tip_amount
+        description: "Pourboire (défaut: 0.00)"
+      - name: tolls_amount
+        description: "Péages (défaut: 0.00)"
+      - name: improvement_surcharge
+        description: "Surtaxe d'amélioration (défaut: 0.00)"
+      - name: congestion_surcharge
+        description: "Surtaxe congestion (défaut: 0.00)"
+      - name: airport_fee
+        description: "Frais aéroportuaires (défaut: 0.00)"
+      - name: total_amount
+        description: "Montant total facturé au passager (NUMERIC(10,2))"
+      - name: duration_minutes
+        description: "Durée calculée du trajet en minutes (NUMERIC(10,2))"
+      - name: avg_speed_mph
+        description: "Vitesse moyenne en mph (NUMERIC(10,2))"
+      - name: is_airport_trip
+        description: "Flag booléen trajet aéroportuaire (zones 1, 132, 138)"
+      - name: partition_year
+        description: "Année de partition (INTEGER)"
+      - name: partition_month_num
+        description: "Mois de partition numérique (INTEGER)"
+      - name: partition_month
+        description: "Partition mensuelle formatée YYYY-MM"
+
+  # ============================================================================
+  # 2. STAGING: stg_quarantine_trips
+  # ============================================================================
+  - name: stg_quarantine_trips
+    description: >
+      Vue de staging des trajets rejetés par les 5 règles de validation qualité.
+      Préserve le motif de rejet concaténé et les horodatages originaux.
+    columns:
+      - name: reject_reason
+        description: "Motif(s) de rejet concaténés par '|' (ex: invalid_duration|negative_amount)"
+        tests:
+          - not_null
+      - name: pickup_datetime
+        description: "Horodatage de prise en charge du trajet rejeté"
+      - name: partition_month
+        description: "Partition mensuelle YYYY-MM"
+
+  # ============================================================================
+  # 3. STAGING: stg_taxi_zones
+  # ============================================================================
+  - name: stg_taxi_zones
+    description: >
+      Vue de staging du référentiel officiel des 265 zones TLC NYC.
+      Ajoute la catégorisation spatiale (aéroport, centre-ville, banlieue).
+    columns:
+      - name: zone_id
+        description: "Identifiant unique de la zone (1–265)"
+        tests:
+          - unique
+          - not_null
+      - name: zone_name
+        description: "Nom du quartier / zone"
+      - name: borough
+        description: "Arrondissement NYC (Manhattan, Queens, Brooklyn, Bronx, Staten Island, EWR)"
+      - name: service_zone
+        description: "Classification de la zone de service TLC"
+
+  # ============================================================================
+  # 4. STAGING: stg_us_holidays
+  # ============================================================================
+  - name: stg_us_holidays
+    description: >
+      Vue de staging du calendrier des jours fériés fédéraux américains.
+      Utilisée pour enrichir dim_date.
+    columns:
+      - name: holiday_date
+        description: "Date du jour férié (DATE)"
+        tests:
+          - not_null
+      - name: holiday_name
+        description: "Nom officiel du jour férié"
+
+  # ============================================================================
+  # 5. STAGING: stg_nyc_weather
+  # ============================================================================
+  - name: stg_nyc_weather
+    description: >
+      Vue de staging des données météorologiques journalières NYC (Open-Meteo).
+      Utilisée pour enrichir dim_date avec les conditions climatiques.
+    columns:
+      - name: weather_date
+        description: "Date d'observation (DATE)"
+        tests:
+          - unique
+          - not_null
+      - name: temp_max_celsius
+        description: "Température maximale journalière en °C à 2m"
+      - name: temp_min_celsius
+        description: "Température minimale journalière en °C à 2m"
+      - name: precipitation_mm
+        description: "Précipitations totales journalières en mm"
+      - name: snowfall_cm
+        description: "Chutes de neige totales journalières en cm"
+

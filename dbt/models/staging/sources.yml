@@ -1,0 +1,97 @@
+# ==============================================================================
+# NYC Taxi Data Platform — Staging Sources Definition
+# ==============================================================================
+
+version: 2
+
+sources:
+  - name: raw_silver
+    description: "Cleaned and deduplicated Silver layer (Delta Lake on MinIO / PostgreSQL)"
+    schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+    tables:
+      - name: yellow_trips
+        description: "NYC Yellow Taxi cleaned trips written by Spark bronze_to_silver job"
+        loaded_at_field: tpep_pickup_datetime
+        freshness:
+          warn_after: { count: 45, period: day }
+          error_after: { count: 90, period: day }
+        columns:
+          - name: trip_hash
+            description: "SHA-256 unique trip fingerprint"
+          - name: vendor_id
+            description: "TLC vendor code (1: Creative Mobile, 2: VeriFone)"
+          - name: tpep_pickup_datetime
+            description: "Meter engagement timestamp"
+          - name: tpep_dropoff_datetime
+            description: "Meter disengagement timestamp"
+          - name: passenger_count
+            description: "Number of passengers in the vehicle"
+          - name: trip_distance
+            description: "Trip distance in miles reported by taximeter"
+          - name: pu_location_id
+            description: "TLC Taxi Zone LocationID where meter was engaged"
+          - name: do_location_id
+            description: "TLC Taxi Zone LocationID where meter was disengaged"
+          - name: payment_type
+            description: "Payment method code (1: Credit, 2: Cash, etc.)"
+          - name: fare_amount
+            description: "Time-and-distance fare calculated by the meter"
+          - name: total_amount
+            description: "Total amount charged to passengers, including taxes and fees"
+
+  - name: raw_quarantine
+    description: "Invalid taxi trip records isolated during quality rule checks"
+    schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+    tables:
+      - name: yellow_quarantine
+        description: "Quarantine partition storing rejected trip records and violation reasons"
+        columns:
+          - name: reject_reason
+            description: "Piped list of failed quality rules (invalid_duration, invalid_distance, etc.)"
+          - name: tpep_pickup_datetime
+            description: "Pickup timestamp"
+          - name: total_amount
+            description: "Total amount on rejected trip"
+
+  - name: raw_reference
+    description: "Static reference tables and lookup catalogs"
+    schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+    tables:
+      - name: taxi_zones
+        description: "NYC Taxi & Limousine Commission official Taxi Zone Lookup"
+        columns:
+          - name: LocationID
+            description: "Unique integer ID of the taxi zone (1 to 265)"
+          - name: Borough
+            description: "NYC borough name (Manhattan, Queens, Brooklyn, Bronx, Staten Island, EWR)"
+          - name: Zone
+            description: "Neighborhood / zone designation"
+          - name: service_zone
+            description: "TLC service zone classification (Yellow Zone, Boro Zone, Airports, etc.)"
+
+      - name: us_holidays
+        description: "US Federal Public Holidays reference calendar"
+        columns:
+          - name: date
+            description: "Calendar date (YYYY-MM-DD)"
+          - name: holiday_name
+            description: "Official holiday designation"
+          - name: year
+            description: "Calendar year"
+          - name: month
+            description: "Calendar month"
+
+      - name: nyc_weather
+        description: "NYC Daily weather metrics (temperature, precipitation, snowfall from Open-Meteo)"
+        columns:
+          - name: time
+            description: "Observation date (YYYY-MM-DD)"
+          - name: temperature_2m_max
+            description: "Maximum daily temperature in Celsius at 2m"
+          - name: temperature_2m_min
+            description: "Minimum daily temperature in Celsius at 2m"
+          - name: precipitation_sum
+            description: "Total daily precipitation in mm"
+          - name: snowfall_sum
+            description: "Total daily snowfall in cm"
+

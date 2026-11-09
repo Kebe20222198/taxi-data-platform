@@ -1,0 +1,101 @@
+[project]
+name = "taxi-data-platform"
+version = "1.0.0"
+description = "NYC Taxi Big Data Lakehouse & Analytics Platform — Medallion Architecture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Kebe" }]
+keywords = ["data-engineering", "spark", "delta-lake", "airflow", "dbt", "lakehouse", "medallion"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Programming Language :: Python :: 3.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kebe20222198/taxi-data-platform"
+Repository = "https://github.com/Kebe20222198/taxi-data-platform"
+
+# ==============================================================================
+# Pytest Configuration
+# ==============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=spark_jobs --cov=ingestion --cov-fail-under=70 --tb=short -q"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "unit: Unit tests (deselect with '-m \"not unit\"')",
+    "integration: Integration tests requiring Spark + MinIO (deselect with '-m \"not integration\"')",
+    "e2e: End-to-end pipeline tests",
+    "slow: Slow tests (benchmark, full pipeline)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyspark.*",
+    "ignore::UserWarning:pyspark.*",
+]
+
+# ==============================================================================
+# Ruff Linter & Formatter Configuration
+# ==============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dbt/target",
+    "data",
+    ".git",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "W",    # pycodestyle warnings
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "N",    # pep8-naming
+]
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+    "B008",   # Do not perform function call in argument defaults
+    "N803",   # Argument name should be lowercase (Spark convention)
+    "N806",   # Variable in function should be lowercase (Spark convention)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["spark_jobs", "ingestion"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ==============================================================================
+# Coverage Configuration
+# ==============================================================================
+[tool.coverage.run]
+source = ["spark_jobs", "ingestion"]
+omit = [
+    "tests/*",
+    "spark_jobs/__pycache__/*",
+    "ingestion/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+
