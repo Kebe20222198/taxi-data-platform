@@ -36,6 +36,8 @@
 
 La plateforme implémente l'architecture **Médaillon (Medallion Lakehouse)** garantissant l'immuabilité des données brutes, la traçabilité des rejets et l'idempotence totale des recalculs.
 
+![Architecture Globale du Medallion Lakehouse](docs/img/medallion_architecture_overview.png)
+
 ```mermaid
 flowchart TD
     subgraph Sources["🌐 Sources Externes"]
@@ -137,15 +139,15 @@ make run MONTH=2025-01
 
 ---
 
-## 📐 Modélisation Dimensionnelle (Star Schema Kimball)
+## 📐 Modélisation Dimensionnelle (Star Schema Kimball & Data Quality)
 
-Le projet structure les données en étoile pour optimiser les requêtes décisionnelles et éliminer la redondance :
+Le projet structure les données en étoile pour optimiser les requêtes décisionnelles et éliminer la redondance, avec un filtrage étanche des anomalies :
 
-![Modélisation Dimensionnelle en Étoile](docs/img/dimensional_model_star_schema.jpg)
+![Schéma en Étoile Kimball & Data Quality Framework](docs/img/kimball_star_schema_quality.png)
 
 * **Table de Faits (`fct_trips`)** : Grain = 1 trajet (35M+ lignes). Clés étrangères vers date, zone de prise en charge, zone de dépose, mode de paiement. Matérialisation incrémentale mensuelle avec stratégie idempotente `delete+insert`.
-* **Dimension Date (`dim_date`)** : Grain = 1 jour. Hiérarchie calendrier, détection des week-ends et intégration des jours fériés fédéraux US.
-* **Dimension Zone (`dim_zone`)** : Grain = 1 zone. 265 zones officielles TLC réparties entre Manhattan, Queens, Brooklyn, Bronx, Staten Island et EWR.
+* **Dimension Date (`dim_date`)** : Grain = 1 jour. Hiérarchie calendrier, détection des week-ends et intégration des jours fériés fédéraux US enrichis par les données météorologiques journalières de NYC.
+* **Dimension Zone (`dim_zone`)** : Grain = 1 zone. 265 zones officielles TLC réparties entre Manhattan, Queens, Brooklyn, Bronx, Staten Island et EWR, avec typologie urbaine (Core Urban, Airport Hub, Outer Borough).
 * **Dimension Mode de Paiement (`dim_payment_type`)** : Grain = 1 mode. Libellés explicites en français (*Carte bancaire, Espèces, Sans frais, Litige, Inconnu, Annulé*).
 * **Marts Agrégés & Qualité (`agg_zone_hourly`, `quarantine_summary`)** : Accélération des requêtes de pointe et monitoring des rejets qualité.
 
@@ -154,6 +156,8 @@ Le projet structure les données en étoile pour optimiser les requêtes décisi
 ## 🏎️ Synthèse des Gains de Performance Spark (Phase 5)
 
 Une démarche expérimentale rigoureuse en 8 paliers cumulatifs a permis de **diviser par 4 le temps de traitement** sur 12 mois complets :
+
+![Apache Spark 3.5 Optimization Benchmark](docs/img/spark_performance_benchmark.png)
 
 ```
 Temps d'exécution (secondes) — Volume 12 mois (35M lignes)

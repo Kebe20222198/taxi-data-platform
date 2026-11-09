@@ -7,6 +7,8 @@
 
 Le projet **NYC Taxi Data Platform** a été conçu pour traiter, assainir, modéliser et valoriser un volume annuel de **35 à 40 millions de courses** de taxis new-yorkais (NYC TLC Yellow Taxi).
 
+![Architecture Globale Medallion Lakehouse](img/medallion_architecture_overview.png)
+
 ### Principes Directeurs :
 1. **Fidélité Cloud-Native en Local** : Reproduire localement (sur un ordinateur portable de 16 Go de RAM / 4 cœurs vCPU) une architecture d'entreprise conforme aux standards du cloud (AWS / GCP / Databricks) sans recours à des services propriétaires fermés.
 2. **Architecture Médaillon (Bronze $\to$ Silver $\to$ Gold)** : Séparation étanche entre données brutes immuables, données dédupliquées/assainies, et tables dimensionnelles prêtes à la décision.

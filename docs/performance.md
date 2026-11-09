@@ -7,6 +7,8 @@
 
 Ce document consigne la démarche expérimentale rigoureuse mise en œuvre pour réduire d'au moins **50%** le temps de traitement de bout en bout du pipeline de données NYC Yellow Taxi sur une fenêtre glissante de 12 mois (~35 à 40 millions d'enregistrements Parquet / Delta Lake).
 
+![Apache Spark 3.5 Optimization Benchmark](img/spark_performance_benchmark.png)
+
 ### Spécifications de la Plateforme d'Expérimentation
 - **Hôte d'exécution** : Machine locale 16 Go RAM / 4 cœurs vCPU.
 - **Moteur distribué** : Apache Spark 3.5.1 (Master + 1 Worker alloué à 4 cœurs / 4 Go Executor Heap + 2 Go Driver).
